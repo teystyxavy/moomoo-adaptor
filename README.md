@@ -23,6 +23,8 @@ AAPL SELL seq=48214 price=213.48 volume=200
 
 ## Building
 
+**`proto/` is not in this repo — fetch it first.** It's gitignored (moomoo's schema files aren't ours to redistribute), so a fresh clone is missing it entirely and `cargo build` will fail with no `.proto` files to compile. Download the proto file bundle from moomoo's official OpenAPI documentation site (moomoo publishes these specifically so developers can build their own clients against the OpenD protocol — the version used here was `MMAPIProtoFiles_10.8.6808`) and place all 164 `.proto` files flat inside a `proto/` folder at the repo root, alongside `Cargo.toml`.
+
 ```
 cargo build
 ```
