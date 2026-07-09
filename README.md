@@ -16,10 +16,24 @@ AAPL SELL seq=48214 price=213.48 volume=200
 ## Prerequisites
 
 1. **A moomoo account** with market data permissions for whatever you want to watch.
-2. **OpenD running and logged in.** OpenD is moomoo's local gateway process — this Rust program talks to it over TCP on `127.0.0.1:11111`, not to moomoo's servers directly. Start OpenD (GUI or command-line build) and confirm it shows as logged in before running this.
-   - Login credentials live in OpenD's config (`OpenD.xml` if you're using the command-line build). Use `login_pwd_md5` (an MD5 hash of your password), not the plaintext `login_pwd` field — don't check plaintext credentials into version control.
+2. **OpenD running and logged in** — see [Installing and running OpenD](#installing-and-running-opend) below.
 3. **Rust** (edition 2024 — a recent stable toolchain; `cargo --version` should be 1.85+).
 4. **`protoc`** (the Protocol Buffers compiler) installed and on your `PATH` — `prost-build` shells out to it at compile time to turn the vendored `.proto` files into Rust code. Verify with `protoc --version`.
+
+## Installing and running OpenD
+
+OpenD is moomoo's own local gateway process — this Rust program talks to *it* over TCP on `127.0.0.1:11111`, not to moomoo's servers directly, so nothing here works until OpenD is running and logged in. Download it from moomoo's official OpenAPI site; the download includes two variants (GUI app and command-line build), either works.
+
+This project only has the **Ubuntu build** downloaded (see the `OpenD/` folder alongside this repo) — there's no Windows-native OpenD here. That means running it means either grabbing the Windows build instead if you'd rather run it natively, or running the Ubuntu build inside WSL2, which is the setup this project has actually been tested against. For the WSL2 path (command-line build):
+
+1. Copy the `moomoo_OpenD_..._Ubuntu18.04/` folder into your WSL2 filesystem (e.g. `~/opend/`) — don't run the Linux binary directly off a Windows-mounted path.
+2. Edit `OpenD.xml`: set `<login_account>` to your moomoo account, and `<login_pwd_md5>` to the MD5 hash of your password. **Never put a plaintext password in `<login_pwd>`, and never commit `OpenD.xml` anywhere** — it holds your account identifier and credential hash. Leave `<api_port>` at `11111` to match what this Rust client expects.
+3. `chmod +x OpenD`, then run it: `./OpenD`
+4. Watch its log output for a successful login confirmation before starting `moomoo-adaptor` — connecting before OpenD has finished logging in will fail immediately.
+
+WSL2 forwards `127.0.0.1` automatically between Windows and the WSL2 instance, so a service listening on `127.0.0.1:11111` inside WSL2 is reachable at the same address from Windows — no extra networking setup needed, and no change required to this project's hardcoded `OPEND_ADDR`.
+
+For the GUI variant, the equivalent is launching the `.AppImage`, logging in through its own interface, and confirming the same `api_port` in its settings panel.
 
 ## Building
 
