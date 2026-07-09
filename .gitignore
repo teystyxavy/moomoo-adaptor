@@ -1,0 +1,21 @@
+/target
+
+# environment / secrets
+.env
+.env.*
+
+# logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+#moomoo proprietary proto files
+proto
