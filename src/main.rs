@@ -5,9 +5,13 @@ mod frame;
 mod live_subscriber;
 mod market_state_querier;
 mod model;
+mod questdb;
+mod config;
+
+use config::Config;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // US market (11), example ticker — swap for whatever you're watching
-    engine::stream_ticker(11, "AAPL").await
+    let cfg = Config::from_env()?;
+    engine::stream_ticker(cfg).await
 }

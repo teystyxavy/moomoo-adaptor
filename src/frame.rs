@@ -58,7 +58,7 @@ pub fn parse_header(header_bytes: &[u8; 44]) -> Result<FrameHeader, &'static str
     });
 }
 
-pub async fn read_frame(stream: &mut TcpStream) -> anyhow::Result<(FrameHeader, Vec<u8>)> {
+pub async fn read_frame<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> anyhow::Result<(FrameHeader, Vec<u8>)> {
     let mut header_buf: [u8; 44] = [0u8; 44];
     stream.read_exact(&mut header_buf).await?;
     let header = parse_header(&header_buf).map_err(anyhow::Error::msg)?;

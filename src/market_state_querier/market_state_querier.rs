@@ -2,10 +2,10 @@ use crate::mods::qot_common::{QotMarketState, Security};
 use crate::mods::qot_get_market_state::{C2s, Request, MarketInfo, Response};
 use prost::Message;
 
-pub fn build_market_state_request(security: Security) -> Result<Vec<u8>, prost::EncodeError> {
+pub fn build_market_state_request(security: &Security) -> Result<Vec<u8>, prost::EncodeError> {
     let c2s = C2s {
         header: None, // to replace with actual header
-        security_list: vec![security],
+        security_list: vec![security.clone()],
     };
 
     let req = Request { c2s };

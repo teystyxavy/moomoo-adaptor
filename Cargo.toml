@@ -12,6 +12,9 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 prost = "0.14.4"
 sha1 = "0.11.0"
+questdb-rs = "6.1.0"
+chrono = "0.4.45"
+ndarray = "0.17.2"
 
 [build-dependencies]
 prost-build = "0.14.4"
