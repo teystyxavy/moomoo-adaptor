@@ -15,6 +15,8 @@ sha1 = "0.11.0"
 questdb-rs = "6.1.0"
 chrono = "0.4.45"
 ndarray = "0.17.2"
+dotenvy = "0.15"
+futures = "0.3.32"
 
 [build-dependencies]
 prost-build = "0.14.4"

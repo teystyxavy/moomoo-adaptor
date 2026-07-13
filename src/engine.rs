@@ -169,15 +169,10 @@ async fn subscribe_ticker(counter: &Arc<AtomicU32>, stream: &mut TcpStream, mark
     Ok(())
 }
 
-pub async fn stream_ticker(config: Config) -> anyhow::Result<()> {
-    let writer = writer::spawn_writer(&config.questdb_conf)?;
-
-    let target_security = Security{
-        market: config.market,
-        code: config.ticker.clone(),
-    };
-
-    let mut backoff = config.initial_backoff;
+pub async fn stream_ticker(target_security: Security, init_backoff: Duration, healthy_threshold: Duration, 
+    max_retries: u8, max_backoff: Duration, writer: Sender<schema::TickerTick>) -> anyhow::Result<()> {
+   
+    let mut backoff = init_backoff;
     let mut consecutive_setup_failures = 0;
 
     let result: anyhow::Result<()> = loop {
@@ -185,19 +180,19 @@ pub async fn stream_ticker(config: Config) -> anyhow::Result<()> {
         match run_once(&target_security, &writer).await {
             Ok(()) => break Ok(()),
             Err(e) => {
-                if started.elapsed() > config.healthy_threshold {
+                if started.elapsed() > healthy_threshold {
                     // reset setup failures
-                    backoff = config.initial_backoff;
+                    backoff = init_backoff;
                     consecutive_setup_failures = 0;
                 }
 
                 consecutive_setup_failures += 1;
-                if consecutive_setup_failures > config.max_retries  {
+                if consecutive_setup_failures > max_retries  {
                     break Err(e);
                 }
                 eprintln!("connection error: {e:?}, retrying in {backoff:?}");
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(config.max_backoff);
+                backoff = (backoff * 2).min(max_backoff);
             }
         }
     };
