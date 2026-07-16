@@ -1,7 +1,35 @@
-use questdb::{ingress::{Sender}};
+use questdb::ingress::{Buffer, Sender};
 use tokio::sync::mpsc;
 
 use crate::questdb::schema::TickerTick;
+
+const MAX_BATCH: usize = 500;
+
+fn append_row(buffer: &mut Buffer, tick: &TickerTick) -> bool {
+    if let Err(e) = buffer.set_marker() {
+        eprint!("failed to set buffer marker {e}");
+        return false;
+    }
+
+    let result = buffer.table("ticks")
+                .and_then(|b| b.symbol("symbol", &tick.symbol))
+                .and_then(|b| b.column_f64("price", tick.price))
+                .and_then(|b| b.column_i64("volume", tick.volume))
+                .and_then(|b| b.column_i64("sequence", tick.sequence))
+                .and_then(|b| b.at_now());
+
+    match result {
+        Ok(_) => {buffer.clear_marker(); true},
+        Err(e) => {
+            eprintln!("failed to append row due to: {e}"); 
+            if let Err(e2) = buffer.rewind_to_marker() {
+                eprintln!("failed to rewind buffer after bad row: {e2}");
+            }
+            false
+        },
+    }
+        
+}
 
 pub fn spawn_writer(quest_conf: &str) -> anyhow::Result<mpsc::Sender<TickerTick>> {
     let (db_tx, mut db_rx) = mpsc::channel::<TickerTick>(256);
@@ -15,22 +43,31 @@ pub fn spawn_writer(quest_conf: &str) -> anyhow::Result<mpsc::Sender<TickerTick>
                 return;
             }
         };
-        
-        while let Some(tick) = db_rx.blocking_recv(){
+
+        loop {
+            let first = match db_rx.blocking_recv() {
+                Some(t) => t,
+                None => break, // all senders dropped, done
+            };
+
             let mut buffer = sender.new_buffer();
-            if let Err(e) = buffer.table("ticks")
-                .and_then(|b| b.symbol("symbol", &tick.symbol))
-                .and_then(|b| b.column_f64("price", tick.price))
-                .and_then(|b| b.column_i64("volume", tick.volume))
-                .and_then(|b| b.column_i64("sequence", tick.sequence))
-                .and_then(|b| b.at_now())
-            {
-                eprint!("failed to build row: {e}");
-                continue;
+            let mut count = 0;
+            if append_row(&mut buffer, &first) {
+                count += 1;
+                while count < MAX_BATCH {
+                    match db_rx.try_recv(){
+                        Ok(tick) => {
+                            if append_row(&mut buffer, &tick) { count+=1;}
+                        },
+                        Err(_) => break,
+                    }
+                }
             }
-            if let Err(e) = sender.flush(&mut buffer) {
-                eprintln!("failed to flush to QuestDB: {e}");
+
+            if let Err(e) = sender.flush(&mut buffer){
+                eprintln!("failed to flush {count} row(s) to QuestDB: {e}");
             }
+
         }
     });
 

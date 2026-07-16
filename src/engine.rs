@@ -13,9 +13,8 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use crate::questdb::{writer, schema};
+use crate::questdb::{schema};
 use tokio::sync::mpsc::Sender;
-use crate::config::Config;
 
 
 const OPEND_ADDR: &str = "127.0.0.1:11111";
@@ -23,19 +22,23 @@ const CLIENT_VER: i32 = 101;
 const CLIENT_ID: &str = "moomoo_adaptor";
 const SEQ_ORDER: Ordering = Ordering::Relaxed;
 
+fn convert_to_ns(secs: f64) -> f64{
+    secs * 1e9
+}
+
 async fn run_once(target_security: &Security, writer: &Sender<schema::TickerTick>) -> anyhow::Result<()>{
     let market =  target_security.market;
     let code = target_security.code.to_string();
-    let counter = Arc::new(AtomicU32::new(1)); // start at 1 cos 0 means failed
+    let counter = Arc::new(AtomicU32::new(1)); // start at 1, 0 means failed request
 
     // init TCP handshake
-    let (mut stream, heartbeat_duration) = establish_connection(&counter).await?;
+    let (mut stream, heartbeat_duration) = establish_connection(&counter, &code).await?;
 
     // check market state before subscribing
     let market_info_vec = check_market_state(&counter, target_security, &mut stream).await?;
     for item in &market_info_vec{
-        println!("market with id:{} and name:{} has status{}", item.security.market, item.name, item.market_state);
-        println!("proceeding to subscribe to ticker")
+        println!("{code}: market id={} name={} status={}", item.security.market, item.name, item.market_state);
+        println!("{code}: proceeding to subscribe to ticker");
     }
 
     // --- Subscribe to the trade tape (Ticker) for this security ---
@@ -81,19 +84,19 @@ async fn run_once(target_security: &Security, writer: &Sender<schema::TickerTick
                     };
 
                     if header.proto_id == KEEP_ALIVE {
-                        println!("keep-alive reply received");
+                        println!("{code}: keep-alive reply received");
                         continue;
                     }
 
                     if header.proto_id != QOT_UPDATE_TICKER {
-                        println!("ignoring unhandled proto_id={}", header.proto_id);
+                        println!("{code}: ignoring unhandled proto_id={}", header.proto_id);
                         continue;
                     }
 
                     let push = qot_update_ticker::Response::decode(body.as_slice())?;
+                    let received_at_ns = chrono::Utc::now(); // when the process decodes the frame
                     let Some(s2c) = push.s2c else { continue };
                     let ticker_code = s2c.security.code.clone();
-
 
                     for t in s2c.ticker_list {
                         let side = match t.dir {
@@ -103,14 +106,20 @@ async fn run_once(target_security: &Security, writer: &Sender<schema::TickerTick
                             _ => "UNKNOWN",
                         };
                         // create new row and send to buffer to write to questdb
+                        let event_time_ns = t.recv_time.map(|secs| convert_to_ns(secs) as i64);
+
                         let new_row = schema::TickerTick{
                             symbol: ticker_code.clone(),
                             price: t.price,
                             volume: t.volume,
                             side: side,
                             sequence: t.sequence,
+                            received_at_ns: received_at_ns.timestamp_nanos_opt().unwrap_or_else(|| 0),
+                            event_time_ns: event_time_ns,
                         };
-                        writer.send(new_row).await?;
+                        if let Err(e) = writer.send(new_row).await {
+                            eprintln!("{code}, failed to queue tick for QuestDB: {e}");
+                        }
                         println!(
                             "{ticker_code} {side} seq={} price={} volume={}",
                             t.sequence, t.price, t.volume
@@ -129,7 +138,7 @@ fn get_seq_no(counter: &Arc<AtomicU32>) -> u32{
     counter.fetch_add(1, SEQ_ORDER)
 }
 
-async fn establish_connection(counter: &Arc<AtomicU32>) -> Result<(TcpStream, i32), anyhow::Error>{
+async fn establish_connection(counter: &Arc<AtomicU32>, code: &str) -> Result<(TcpStream, i32), anyhow::Error>{
     let mut stream = TcpStream::connect(OPEND_ADDR).await?;
 
     let init_body = build_init_conn_req(CLIENT_VER, CLIENT_ID.to_string())?;
@@ -146,7 +155,7 @@ async fn establish_connection(counter: &Arc<AtomicU32>) -> Result<(TcpStream, i3
 
     let s2c = init_resp.s2c.ok_or_else( || anyhow::anyhow!("InitConnect reply missing s2c"))?;
 
-    println!("connected: conn_id={} keep_alive_interval={}s", s2c.conn_id, s2c.keep_alive_interval);
+    println!("{code}: connected: conn_id={} keep_alive_interval={}s", s2c.conn_id, s2c.keep_alive_interval);
 
     Ok((stream, s2c.keep_alive_interval))
 }
@@ -190,7 +199,7 @@ pub async fn stream_ticker(target_security: Security, init_backoff: Duration, he
                 if consecutive_setup_failures > max_retries  {
                     break Err(e);
                 }
-                eprintln!("connection error: {e:?}, retrying in {backoff:?}");
+                eprintln!("{}: connection error: {e:?}, retrying in {backoff:?}", target_security.code);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
             }

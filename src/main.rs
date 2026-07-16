@@ -23,12 +23,12 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let cfg = Config::from_env()?;
-    let writer = writer::spawn_writer(&cfg.questdb_conf)?;
+    let qdb_writer = writer::spawn_writer(&cfg.questdb_conf)?;
     let mut symbols: Vec<String> = vec![];
     let mut handles: Vec<JoinHandle<()>> = vec![];
     
     for sec in cfg.securities{
-        let c_writer = writer.clone();
+        let c_writer = qdb_writer.clone();
         let symbol = sec.code.clone();
         symbols.push(symbol.clone());
         handles.push(tokio::spawn(async move {
