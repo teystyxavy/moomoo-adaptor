@@ -1,24 +1,18 @@
 use questdb::ingress::{Buffer, Sender};
 use tokio::sync::mpsc;
 
-use crate::questdb::schema::TickerTick;
+use crate::questdb::schema::{IlpRow, TickerTick};
 
 const MAX_BATCH: usize = 500;
 
-fn append_row(buffer: &mut Buffer, tick: &TickerTick) -> bool {
+fn append_row<T:IlpRow>(buffer: &mut Buffer, row: &T) -> bool {
     if let Err(e) = buffer.set_marker() {
         eprint!("failed to set buffer marker {e}");
         return false;
     }
 
-    let result = buffer.table("ticks")
-                .and_then(|b| b.symbol("symbol", &tick.symbol))
-                .and_then(|b| b.column_f64("price", tick.price))
-                .and_then(|b| b.column_i64("volume", tick.volume))
-                .and_then(|b| b.column_i64("sequence", tick.sequence))
-                .and_then(|b| b.at_now());
 
-    match result {
+    match row.write_into(buffer) {
         Ok(_) => {buffer.clear_marker(); true},
         Err(e) => {
             eprintln!("failed to append row due to: {e}"); 
@@ -31,8 +25,10 @@ fn append_row(buffer: &mut Buffer, tick: &TickerTick) -> bool {
         
 }
 
-pub fn spawn_writer(quest_conf: &str) -> anyhow::Result<mpsc::Sender<TickerTick>> {
-    let (db_tx, mut db_rx) = mpsc::channel::<TickerTick>(256);
+pub fn spawn_writer<T>(quest_conf: &str) -> anyhow::Result<mpsc::Sender<T>> 
+where T: IlpRow + Send + 'static,
+{
+    let (db_tx, mut db_rx) = mpsc::channel::<T>(256);
     let quest_conf = quest_conf.to_string();
 
     tokio::task::spawn_blocking(move ||{

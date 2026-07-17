@@ -2,10 +2,10 @@ use crate::client::{build_init_conn_req, build_keep_alive_ereq, handle_response}
 use crate::frame::{build_frame, read_frame, FrameHeader};
 use crate::live_subscriber::subscribe::{build_sub_request};
 use crate::market_state_querier::market_state_querier::{build_market_state_request, parse_market_state_response};
-use crate::model::proto_ids::{INIT_CONNECT, KEEP_ALIVE, QOT_UPDATE_TICKER, QOT_SUB, QOT_GET_MARKET_STATE};
+use crate::model::proto_ids::{INIT_CONNECT, KEEP_ALIVE, QOT_UPDATE_TICKER, QOT_SUB, QOT_GET_MARKET_STATE, QOT_UPDATE_ORDER_BOOK};
 use crate::mods::qot_common::{Security, SubType};
 use crate::mods::qot_get_market_state::MarketInfo;
-use crate::mods::{qot_sub, qot_update_ticker};
+use crate::mods::{qot_sub, qot_update_order_book, qot_update_ticker};
 use prost::Message;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -14,7 +14,6 @@ use tokio::time::{interval, Duration};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use crate::questdb::{schema};
-use tokio::sync::mpsc::Sender;
 use tokio::sync::broadcast;
 
 
@@ -27,7 +26,11 @@ fn convert_to_ns(secs: f64) -> f64{
     secs * 1e9
 }
 
-async fn run_once(target_security: &Security, bus: &broadcast::Sender<schema::TickerTick>) -> anyhow::Result<()>{
+fn get_curr_time() -> i64 {
+    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+}
+
+async fn run_once(target_security: &Security, bus: &broadcast::Sender<schema::TickerTick>, ob_bus: &broadcast::Sender<schema::OrderBookLevel>) -> anyhow::Result<()>{
     let market =  target_security.market;
     let code = target_security.code.to_string();
     let counter = Arc::new(AtomicU32::new(1)); // start at 1, 0 means failed request
@@ -86,6 +89,36 @@ async fn run_once(target_security: &Security, bus: &broadcast::Sender<schema::Ti
 
                     if header.proto_id == KEEP_ALIVE {
                         println!("{code}: keep-alive reply received");
+                        continue;
+                    } 
+
+                    if header.proto_id == QOT_UPDATE_ORDER_BOOK {
+                        let push = qot_update_order_book::Response::decode(body.as_slice())?;
+                        let Some(s2c) = push.s2c else { continue };
+                        // implementation
+                        let symbol = s2c.security.code.clone();
+                        let ts = get_curr_time();
+
+                        for (level, l) in s2c.order_book_bid_list.iter().enumerate() {
+                            let row = schema::OrderBookLevel {
+                                symbol: symbol.clone(), side: "BID", level: level as i32,
+                                price: l.price, volume: l.volume, order_count: l.oreder_count,
+                                received_at_ns: ts,
+                            };
+                            if let Err(e) = ob_bus.send(row) {
+                                eprintln!("{code}: no subscribers on order-book bus: {e}");
+                            }
+                        }
+                        for (level, l) in s2c.order_book_ask_list.iter().enumerate() {
+                            let row = schema::OrderBookLevel {
+                                symbol: symbol.clone(), side: "ASK", level: level as i32,
+                                price: l.price, volume: l.volume, order_count: l.oreder_count,
+                                received_at_ns: ts,
+                            };
+                            if let Err(e) = ob_bus.send(row) {
+                                eprintln!("{code}: no subscribers on order-book bus: {e}");
+                            }
+                        }
                         continue;
                     }
 
@@ -169,7 +202,7 @@ async fn check_market_state(counter: &Arc<AtomicU32>, security: &Security, strea
 }
 
 async fn subscribe_ticker(counter: &Arc<AtomicU32>, stream: &mut TcpStream, market: i32, code: &str) -> anyhow::Result<()> {
-    let sub_body = build_sub_request(market, code.to_string(), vec![SubType::Ticker])?;
+    let sub_body = build_sub_request(market, code.to_string(), vec![SubType::Ticker, SubType::OrderBook])?;
     stream.write_all(&build_frame(QOT_SUB, get_seq_no(counter), &sub_body)).await?;
     let (_header, body) = read_frame(stream).await?;
     let sub_resp = qot_sub::Response::decode(body.as_slice())?;
@@ -180,14 +213,14 @@ async fn subscribe_ticker(counter: &Arc<AtomicU32>, stream: &mut TcpStream, mark
 }
 
 pub async fn stream_ticker(target_security: Security, init_backoff: Duration, healthy_threshold: Duration, 
-    max_retries: u8, max_backoff: Duration, bus: broadcast::Sender<schema::TickerTick>) -> anyhow::Result<()> {
+    max_retries: u8, max_backoff: Duration, bus: broadcast::Sender<schema::TickerTick>, ob_bus: broadcast::Sender<schema::OrderBookLevel>) -> anyhow::Result<()> {
    
     let mut backoff = init_backoff;
     let mut consecutive_setup_failures = 0;
 
     let result: anyhow::Result<()> = loop {
         let started = std::time::Instant::now();
-        match run_once(&target_security, &bus).await {
+        match run_once(&target_security, &bus, &ob_bus).await {
             Ok(()) => break Ok(()),
             Err(e) => {
                 if started.elapsed() > healthy_threshold {

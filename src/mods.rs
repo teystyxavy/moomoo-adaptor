@@ -25,3 +25,7 @@ pub mod qot_get_market_state {
 pub mod keep_alive {
     include!(concat!(env!("OUT_DIR"), "/keep_alive.rs"));
 }
+
+pub mod qot_update_order_book {
+    include!(concat!(env!("OUT_DIR"), "/qot_update_order_book.rs"));
+}
