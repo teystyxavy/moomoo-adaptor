@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use crate::questdb::{schema};
 use tokio::sync::mpsc::Sender;
+use tokio::sync::broadcast;
 
 
 const OPEND_ADDR: &str = "127.0.0.1:11111";
@@ -26,7 +27,7 @@ fn convert_to_ns(secs: f64) -> f64{
     secs * 1e9
 }
 
-async fn run_once(target_security: &Security, writer: &Sender<schema::TickerTick>) -> anyhow::Result<()>{
+async fn run_once(target_security: &Security, bus: &broadcast::Sender<schema::TickerTick>) -> anyhow::Result<()>{
     let market =  target_security.market;
     let code = target_security.code.to_string();
     let counter = Arc::new(AtomicU32::new(1)); // start at 1, 0 means failed request
@@ -117,7 +118,7 @@ async fn run_once(target_security: &Security, writer: &Sender<schema::TickerTick
                             received_at_ns: received_at_ns.timestamp_nanos_opt().unwrap_or_else(|| 0),
                             event_time_ns: event_time_ns,
                         };
-                        if let Err(e) = writer.send(new_row).await {
+                        if let Err(e) = bus.send(new_row) {
                             eprintln!("{code}, failed to queue tick for QuestDB: {e}");
                         }
                         println!(
@@ -179,14 +180,14 @@ async fn subscribe_ticker(counter: &Arc<AtomicU32>, stream: &mut TcpStream, mark
 }
 
 pub async fn stream_ticker(target_security: Security, init_backoff: Duration, healthy_threshold: Duration, 
-    max_retries: u8, max_backoff: Duration, writer: Sender<schema::TickerTick>) -> anyhow::Result<()> {
+    max_retries: u8, max_backoff: Duration, bus: broadcast::Sender<schema::TickerTick>) -> anyhow::Result<()> {
    
     let mut backoff = init_backoff;
     let mut consecutive_setup_failures = 0;
 
     let result: anyhow::Result<()> = loop {
         let started = std::time::Instant::now();
-        match run_once(&target_security, &writer).await {
+        match run_once(&target_security, &bus).await {
             Ok(()) => break Ok(()),
             Err(e) => {
                 if started.elapsed() > healthy_threshold {
