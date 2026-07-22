@@ -1,7 +1,9 @@
+use std::sync::{Arc, atomic::Ordering};
+
 use questdb::ingress::{Buffer, Sender};
 use tokio::sync::mpsc;
 
-use crate::questdb::schema::{IlpRow, TickerTick};
+use crate::{metrics, questdb::schema::IlpRow};
 
 const MAX_BATCH: usize = 500;
 
@@ -25,7 +27,7 @@ fn append_row<T:IlpRow>(buffer: &mut Buffer, row: &T) -> bool {
         
 }
 
-pub fn spawn_writer<T>(quest_conf: &str) -> anyhow::Result<mpsc::Sender<T>> 
+pub fn spawn_writer<T>(quest_conf: &str, stats: Arc<metrics::QdbStats>) -> anyhow::Result<mpsc::Sender<T>> 
 where T: IlpRow + Send + 'static,
 {
     let (db_tx, mut db_rx) = mpsc::channel::<T>(256);
@@ -60,9 +62,15 @@ where T: IlpRow + Send + 'static,
                 }
             }
 
-            if let Err(e) = sender.flush(&mut buffer){
-                eprintln!("failed to flush {count} row(s) to QuestDB: {e}");
+            let flush_start = std::time::Instant::now();
+            let flush_res = sender.flush(&mut buffer);
+            stats.last_flush_micros.store(flush_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+
+            match flush_res {
+                Ok(()) => {stats.rows_flushed.fetch_add(count as u64, Ordering::Relaxed);},
+                Err(e) => {eprintln!("failed to flush {count} row(s) to QuestDB: {e}")},
             }
+            
 
         }
     });

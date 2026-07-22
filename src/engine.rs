@@ -2,6 +2,7 @@ use crate::client::{build_init_conn_req, build_keep_alive_ereq, handle_response}
 use crate::frame::{build_frame, read_frame, FrameHeader};
 use crate::live_subscriber::subscribe::{build_sub_request};
 use crate::market_state_querier::market_state_querier::{build_market_state_request, parse_market_state_response};
+use crate::metrics;
 use crate::model::proto_ids::{INIT_CONNECT, KEEP_ALIVE, QOT_UPDATE_TICKER, QOT_SUB, QOT_GET_MARKET_STATE, QOT_UPDATE_ORDER_BOOK};
 use crate::mods::qot_common::{Security, SubType};
 use crate::mods::qot_get_market_state::MarketInfo;
@@ -30,7 +31,7 @@ fn get_curr_time() -> i64 {
     chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
 }
 
-async fn run_once(target_security: &Security, bus: &broadcast::Sender<schema::TickerTick>, ob_bus: &broadcast::Sender<schema::OrderBookLevel>) -> anyhow::Result<()>{
+async fn run_once(target_security: &Security, bus: &broadcast::Sender<schema::TickerTick>, ob_bus: &broadcast::Sender<schema::OrderBookLevel>, verbose_ticks: bool) -> anyhow::Result<()>{
     let market =  target_security.market;
     let code = target_security.code.to_string();
     let counter = Arc::new(AtomicU32::new(1)); // start at 1, 0 means failed request
@@ -154,10 +155,12 @@ async fn run_once(target_security: &Security, bus: &broadcast::Sender<schema::Ti
                         if let Err(e) = bus.send(new_row) {
                             eprintln!("{code}, failed to queue tick for QuestDB: {e}");
                         }
-                        println!(
-                            "{ticker_code} {side} seq={} price={} volume={}",
-                            t.sequence, t.price, t.volume
-                        );
+                        if verbose_ticks {
+                            println!(
+                                "{ticker_code} {side} seq={} price={} volume={}",
+                                t.sequence, t.price, t.volume
+                            );
+                        }
                     }
                 }
             }
@@ -212,15 +215,16 @@ async fn subscribe_ticker(counter: &Arc<AtomicU32>, stream: &mut TcpStream, mark
     Ok(())
 }
 
-pub async fn stream_ticker(target_security: Security, init_backoff: Duration, healthy_threshold: Duration, 
-    max_retries: u8, max_backoff: Duration, bus: broadcast::Sender<schema::TickerTick>, ob_bus: broadcast::Sender<schema::OrderBookLevel>) -> anyhow::Result<()> {
-   
+pub async fn stream_ticker(target_security: Security, init_backoff: Duration, healthy_threshold: Duration,
+    max_retries: u8, max_backoff: Duration, bus: broadcast::Sender<schema::TickerTick>, ob_bus: broadcast::Sender<schema::OrderBookLevel>,
+    reconnects: Arc<metrics::ReconnectCounter>, verbose_ticks: bool) -> anyhow::Result<()> {
+
     let mut backoff = init_backoff;
     let mut consecutive_setup_failures = 0;
 
     let result: anyhow::Result<()> = loop {
         let started = std::time::Instant::now();
-        match run_once(&target_security, &bus, &ob_bus).await {
+        match run_once(&target_security, &bus, &ob_bus, verbose_ticks).await {
             Ok(()) => break Ok(()),
             Err(e) => {
                 if started.elapsed() > healthy_threshold {
@@ -233,6 +237,9 @@ pub async fn stream_ticker(target_security: Security, init_backoff: Duration, he
                 if consecutive_setup_failures > max_retries  {
                     break Err(e);
                 }
+                
+                reconnects.bump(); // increment reconnects
+
                 eprintln!("{}: connection error: {e:?}, retrying in {backoff:?}", target_security.code);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);

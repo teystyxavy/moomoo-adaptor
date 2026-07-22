@@ -10,6 +10,7 @@ pub struct Config {
     pub max_retries: u8,
     pub healthy_threshold: Duration,
     pub securities: Vec<Security>,
+    pub verbose_ticks: bool,
 }
 
 impl Config {
@@ -29,6 +30,7 @@ impl Config {
                 }],
                 Err(e) =>  anyhow::bail!("failed to read MOOMOO_SECURITIES: {e}"),
             },
+            verbose_ticks: env_or("VERBOSE_TICKS", false)?,
         })
     }
 }
