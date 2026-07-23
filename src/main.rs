@@ -8,8 +8,9 @@ mod model;
 mod questdb;
 mod config;
 mod metrics;
+mod signals;
 
-use std::hash::Hash;
+use std::eprint;
 use std::sync::Arc;
 
 use config::Config;
@@ -20,6 +21,7 @@ use questdb::writer;
 
 use futures::future::join_all;
 use crate::questdb::schema::{self, TickerTick, OrderBookLevel};
+use crate::signals::{MovingAvgState, Signal};
 use std::collections::HashMap;
 
 const BUFFER_CAP: usize = 2048;
@@ -50,10 +52,17 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let cfg = Config::from_env()?;
+
+    // stats to track wire ingestion and questdb write performance
     let tick_stats = Arc::new(metrics::QdbStats::default());
     let ob_stats = Arc::new(metrics::QdbStats::default());
+    let signal_stats = Arc::new(metrics::QdbStats::default());
+
+    // handlers to send to buffers, underlying questdb writer spawns
     let qdb_writer = writer::spawn_writer::<TickerTick>(&cfg.questdb_conf, tick_stats.clone())?;
     let ob_writer = writer::spawn_writer::<OrderBookLevel>(&cfg.questdb_conf, ob_stats.clone())?;
+    let signal_writer = writer::spawn_writer::<Signal>(&cfg.questdb_conf, signal_stats.clone())?;
+
     let mut symbols: Vec<String> = vec![];
     let mut handles: Vec<JoinHandle<()>> = vec![];
     let reconnect_counter: HashMap<String, Arc<metrics::ReconnectCounter>> = cfg.securities.iter()
@@ -73,6 +82,32 @@ async fn main() -> anyhow::Result<()> {
     let bus_for_len = bus_tx.clone();
     let ob_bus_for_len = ob_bus_tx.clone();
     let reconnect_counter_move = reconnect_counter.clone();
+
+    // signal task
+    let mut signal_rx = bus_tx.subscribe();
+    tokio::spawn(async move {
+        let mut ma_state: HashMap<String, MovingAvgState> = HashMap::new();
+        loop {
+            match signal_rx.recv().await {
+                Ok(tick) => {
+                    let state = ma_state.entry(tick.symbol.clone()).or_default();
+                    if let Some(signal) = state.update(&tick){
+                        println!(
+                            "Signal {}:{} @ {:.2} (MA={:.2})",
+                            signal.symbol, signal.dir, signal.price, signal.moving_avg
+                        );
+                        if let Err(e) = signal_writer.send(signal).await {
+                            eprint!("failed to queue signal for QuestDB: {e}");
+                        }
+                    }
+                },
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("signal engine lagged, missed {n} tick(s)");
+                },
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 
     tokio::spawn(async move {
         let mut tick_counts = HashMap::new();
